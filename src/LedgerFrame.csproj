@@ -21,10 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="model_syncf.xlsx">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="extlink_mapping.json">
+    <None Include="..\samples\TreeVolumeSample.xlsx" Link="TreeVolumeSample.xlsx">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

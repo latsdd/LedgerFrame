@@ -23,13 +23,10 @@ namespace LedgerFrame
             public string src_cell { get; set; }
         }
 
-        // wb: 当前模型(spreadsheet.Workbook);srcPath: 用户选的采伐表数据文件
-        public static Result Inject(IWorkbook wb, string srcPath)
+        // wb: 当前模型(spreadsheet.Workbook);srcPath: 用户选的数据文件;mapJson: 注入点映射
+        public static Result Inject(IWorkbook wb, string srcPath, string mapJson)
         {
-            var mapPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extlink_mapping.json");
-            if (!File.Exists(mapPath))
-                mapPath = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\..\..\extlink_mapping.json"));
-            var entries = JsonSerializer.Deserialize<List<Entry>>(File.ReadAllText(mapPath));
+            var entries = JsonSerializer.Deserialize<List<Entry>>(mapJson);
 
             var res = new Result();
             using (var engine = new ExcelEngine())
