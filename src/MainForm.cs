@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
@@ -14,6 +15,7 @@ namespace LedgerFrame
         readonly ToolStripStatusLabel status;
         System.Collections.Generic.List<ValidationFixer.Entry> dvEntries =
             new System.Collections.Generic.List<ValidationFixer.Entry>();
+        string vmJson;   // validation_map.json 内容(内嵌或开发期文件)
 
         public MainForm()
         {
@@ -54,6 +56,7 @@ namespace LedgerFrame
                 if (e.PropertyName == "ActiveSheet")
                 {
                     HookGrid();
+                    EnsureValidationsResolved();
                     status.Text = "当前表：" + spreadsheet.ActiveSheet.Name;
                 }
             };
@@ -82,6 +85,47 @@ namespace LedgerFrame
                 status.Text = string.Format("已编辑 R{0}C{1}，刷新 {2} ms",
                     g.CurrentCell.RowIndex, g.CurrentCell.ColumnIndex, sw.ElapsedMilliseconds);
             };
+            // Excel 习惯: 点击列表验证格 -> 直接进编辑态显示下拉箭头
+            // (该控件的组合框渲染器只在编辑态出现)
+            g.CellClick += (s, e) =>
+            {
+                try
+                {
+                    var cell = spreadsheet.ActiveSheet.Range[e.RowIndex, e.ColumnIndex];
+                    if (!cell.HasDataValidation) return;
+                    var dv = cell.DataValidation;
+                    if (dv == null || dv.AllowType != ExcelDataType.User) return;
+                    var cc = g.CurrentCell;
+                    if (cc.IsEditing) return;
+                    cc.BeginEdit(true);
+                }
+                catch { }
+            };
+        }
+
+        // 控件对未激活表不建 grid, 验证访问会 NRE; 推迟到表第一次激活时重建联动下拉
+        readonly HashSet<string> dvDoneSheets = new HashSet<string>();
+
+        void EnsureValidationsResolved()
+        {
+            if (vmJson == null || spreadsheet.ActiveSheet == null) return;
+            var sh = spreadsheet.ActiveSheet;
+            if (dvDoneSheets.Contains(sh.Name)) return;
+            dvDoneSheets.Add(sh.Name);
+            try
+            {
+                var list = ValidationFixer.LoadMapForSheet(spreadsheet.Workbook, vmJson, sh.Name);
+                dvEntries.AddRange(list);
+                if (list.Count > 0)
+                    DvLog("resolved " + sh.Name + ": " + list.Count + " 组, 首格 f1="
+                        + list[0].Ranges[0].DataValidation.FirstFormula);
+            }
+            catch (Exception ex) { DvLog("resolve " + sh.Name + " EX: " + ex.Message); }
+        }
+
+        static void DvLog(string line)
+        {
+            try { System.IO.File.AppendAllText(@"C:\tmp\lf_dv.log", line + "\n"); } catch { }
         }
 
         // 读取内嵌加密资源并解密;找不到资源返回 null(开发期回退到明文文件)
@@ -120,16 +164,25 @@ namespace LedgerFrame
                     spreadsheet.Open(path);
                 }
                 sw.Stop();
+                DvLog("--- load ---");
+                // 联动下拉映射只加载文本, 重建推迟到各表首次激活(控件对未激活表不建 grid)
+                try
+                {
+                    byte[] vmBytes = LoadEmbedded("LedgerFrame.valmap.dat");
+                    if (vmBytes != null)
+                        vmJson = System.Text.Encoding.UTF8.GetString(vmBytes);
+                    else
+                    {
+                        string mapPath = FindDevFile("validation_map.json");
+                        if (mapPath != null) vmJson = System.IO.File.ReadAllText(mapPath);
+                    }
+                }
+                catch (Exception exR) { DvLog("vmJson EX: " + exR.Message); }
                 // 全表启用计算引擎(懒计算,显示到哪算哪)
                 foreach (IWorksheet sh in spreadsheet.Workbook.Worksheets)
                     sh.EnableSheetCalculations();
-                // INDIRECT 动态验证解析成静态区域,否则控件不显示下拉
-                var dvSw = System.Diagnostics.Stopwatch.StartNew();
-                dvEntries = ValidationFixer.ResolveAll(spreadsheet.Workbook);
-                dvSw.Stop();
-                status.Text = string.Format("就绪：{0} 张表（加载 {1:F1} 秒，验证解析 {2} 处/{3:F1} 秒）",
-                    spreadsheet.Workbook.Worksheets.Count, sw.Elapsed.TotalSeconds,
-                    dvEntries.Count, dvSw.Elapsed.TotalSeconds);
+                status.Text = string.Format("就绪：{0} 张表（加载 {1:F1} 秒）",
+                    spreadsheet.Workbook.Worksheets.Count, sw.Elapsed.TotalSeconds);
                 GotoDebugCell();
             }
             catch (Exception ex)
@@ -189,28 +242,67 @@ namespace LedgerFrame
             return null;
         }
 
-        // 调试参数 --goto=表名!单元格,用于自动化截图验证
+        // 调试参数 --goto=表名或序号!单元格,用于自动化截图验证
+        // 在 Shown 后延迟执行:Load 阶段控件尚未完成布局,切表会被重置
         void GotoDebugCell()
         {
+            string target = null;
             foreach (var a in Environment.GetCommandLineArgs())
+                if (a.StartsWith("--goto=")) target = a.Substring(7);
+            if (target == null) return;
+            var timer = new Timer { Interval = 1000 };
+            timer.Tick += (s, e) =>
             {
-                if (!a.StartsWith("--goto=")) continue;
-                var arg = a.Substring(7);
-                int bang = arg.LastIndexOf('!');
-                if (bang <= 0) continue;
-                string sheetName = arg.Substring(0, bang);
-                string addr = arg.Substring(bang + 1);
+                timer.Stop();
                 try
                 {
-                    spreadsheet.SetActiveSheet(sheetName);
-                    var cell = spreadsheet.Workbook.Worksheets[sheetName].Range[addr];
+                    int bang = target.LastIndexOf('!');
+                    string sheetName = target.Substring(0, bang);
+                    string addr = target.Substring(bang + 1);
+                    int idx;
+                    if (int.TryParse(sheetName, out idx))
+                        spreadsheet.SetActiveSheet(spreadsheet.Workbook.Worksheets[idx].Name);
+                    else
+                        spreadsheet.SetActiveSheet(sheetName);
+                    var cell = spreadsheet.ActiveSheet.Range[addr];
                     var g = spreadsheet.ActiveGrid;
                     g.CurrentCell.MoveCurrentCell(cell.Row, cell.Column);
                     g.ScrollInView(new Syncfusion.Windows.Forms.CellGrid.ScrollAxis.RowColumnIndex(cell.Row, cell.Column));
                     g.Focus();
+                    // 诊断: 网格渲染器列表 + 该格验证状态
+                    string diag = "";
+                    try
+                    {
+                        var keys = new System.Text.StringBuilder();
+                        foreach (var k in g.CellRenderers.Keys) keys.Append(k).Append('|');
+                        diag = " rend=" + keys
+                            + " B3HasDV=" + spreadsheet.ActiveSheet.Range["B3"].HasDataValidation;
+                    }
+                    catch (Exception dx) { diag = " diagEX=" + dx.Message; }
+                    System.IO.File.WriteAllText(@"C:\tmp\lf_goto.log",
+                        "OK " + spreadsheet.ActiveSheet.Name + " " + addr + diag);
+                    // 诊断2: 进入编辑态, 看组合框编辑器是否出现
+                    bool wantEdit = false;
+                    foreach (var aa in Environment.GetCommandLineArgs()) if (aa == "--edit") wantEdit = true;
+                    if (wantEdit)
+                    {
+                        try
+                        {
+                            g.CurrentCell.BeginEdit(true);
+                            System.IO.File.AppendAllText(@"C:\tmp\lf_goto.log",
+                                "\nBeginEdit: IsEditing=" + g.CurrentCell.IsEditing);
+                            SendKeys.SendWait("{F4}");
+                            System.IO.File.AppendAllText(@"C:\tmp\lf_goto.log", "\nF4 sent");
+                        }
+                        catch (Exception be) { System.IO.File.AppendAllText(@"C:\tmp\lf_goto.log", "\nBeginEdit EX: " + be.Message); }
+                    }
                 }
-                catch (Exception ex) { status.Text = "goto 失败:" + ex.Message; }
-            }
+                catch (Exception ex)
+                {
+                    System.IO.File.WriteAllText(@"C:\tmp\lf_goto.log", "FAIL " + ex);
+                }
+            };
+            timer.Start();
         }
 
         void RefreshAllGrids()

@@ -1,44 +1,58 @@
 using System;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
+using System.IO;
+using System.Text.Json;
 using Syncfusion.XlsIO;
 
 namespace LedgerFrame
 {
-    // WinForms Spreadsheet 不会对验证公式 INDIRECT(单元格) 即时求值,
-    // 导致动态下拉列表不显示。这里在加载后把 INDIRECT 解析成静态区域引用,
-    // 并在源单元格被编辑后重新解析,保持原文件的联动行为。
+    // 联动下拉重建:原文件用 INDIRECT(源单元格) 做级联验证(如 B2 选街道 ->
+    // B3/D3 等列出该街道的村)。模型生成期 INDIRECT 被冻结成静态区域,
+    // 这里按 validation_map.json 在启动时和源单元格被编辑后重建下拉源。
     static class ValidationFixer
     {
+        public class MapEntry
+        {
+            public string sheet { get; set; }
+            public List<string> cells { get; set; }
+            public string source { get; set; }
+        }
+
         public class Entry
         {
             public IWorksheet Sheet;
             public string SourceCell;
-            public IRange Range;
+            public List<IRange> Ranges = new List<IRange>();
         }
 
-        static readonly Regex IndirectRe =
-            new Regex(@"^INDIRECT\(\$?([A-Za-z]+)\$?(\d+)\)$", RegexOptions.IgnoreCase);
+        public static List<Entry> LoadMap(IWorkbook wb, string mapJson)
+        {
+            return LoadMapForSheet(wb, mapJson, null);
+        }
 
-        public static List<Entry> ResolveAll(IWorkbook wb)
+        public static List<Entry> LoadMapForSheet(IWorkbook wb, string mapJson, string onlySheet)
         {
             var list = new List<Entry>();
-            foreach (IWorksheet sh in wb.Worksheets)
+            var maps = JsonSerializer.Deserialize<List<MapEntry>>(mapJson);
+            foreach (var m in maps)
             {
-                IRange used = sh.UsedRange;
-                if (used == null) continue;
-                foreach (IRange cell in used.Cells)
+                if (onlySheet != null && m.sheet != onlySheet) continue;
+                IWorksheet sh;
+                try { sh = wb.Worksheets[m.sheet]; }
+                catch { continue; }
+                if (sh == null) continue;
+                var e = new Entry { Sheet = sh, SourceCell = m.source };
+                foreach (var c in m.cells)
                 {
-                    if (!cell.HasDataValidation) continue;
-                    var dv = cell.DataValidation;
-                    var m = IndirectRe.Match(dv.FirstFormula ?? "");
-                    if (!m.Success) continue;
-                    var e = new Entry
+                    try
                     {
-                        Sheet = sh,
-                        SourceCell = m.Groups[1].Value.ToUpperInvariant() + m.Groups[2].Value,
-                        Range = cell,
-                    };
+                        var r = sh.Range[c];
+                        if (r.HasDataValidation) e.Ranges.Add(r);
+                    }
+                    catch { }
+                }
+                if (e.Ranges.Count > 0)
+                {
                     ResolveOne(wb, e);
                     list.Add(e);
                 }
@@ -48,12 +62,18 @@ namespace LedgerFrame
 
         static void ResolveOne(IWorkbook wb, Entry e)
         {
-            string key = e.Sheet.Range[e.SourceCell].Text;
+            string key = null;
+            try { key = e.Sheet.Range[e.SourceCell].Text; } catch { return; }
             if (key != null) key = key.Trim();
             if (string.IsNullOrEmpty(key)) return;
-            IName name = wb.Names[key];
+            IName name = null;
+            try { name = wb.Names[key]; } catch { }
             if (name == null || name.RefersToRange == null) return;
-            e.Range.DataValidation.FirstFormula = name.RefersToRange.AddressGlobal;
+            string target = name.RefersToRange.AddressGlobal;
+            foreach (var r in e.Ranges)
+            {
+                try { r.DataValidation.FirstFormula = target; } catch { }
+            }
         }
 
         public static void OnCellEdited(IWorkbook wb, List<Entry> entries,

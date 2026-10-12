@@ -24,6 +24,9 @@
     <None Include="..\samples\TreeVolumeSample.xlsx" Link="TreeVolumeSample.xlsx">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="validation_map.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
