@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+model_syncf.xlsx
+extlink_mapping.json
+*.xlsm
+!samples/*.xlsx
+license*.txt
